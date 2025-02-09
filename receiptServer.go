@@ -8,8 +8,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
+
+	"github.com/google/uuid"
 )
 
 type Item struct {
@@ -26,7 +29,7 @@ type Receipt struct {
 
 var receipts = make(map[string]Receipt)
 var pointsAwarded = make(map[string]int)
-var curID = 0
+var mu sync.Mutex
 
 // Get users
 func calcPoints(receipt Receipt) int {
@@ -43,9 +46,11 @@ func calcPoints(receipt Receipt) int {
 	}
 
 	//50 points if total is a round dollar amount with no cents
-	// r, _ := regexp.Compile(`^\\d+\\.\\d{2}$`)
-	// fmt.Println(r.MatchString(receipt.Total))
-	total, _ := strconv.ParseFloat(receipt.Total, 32)
+	total, err := strconv.ParseFloat(receipt.Total, 32)
+	//This shouldn't happen since we check format initially, but just in case
+	if err != nil {
+		return -1
+	}
 	if math.Mod(total, 1.0) == 0 {
 		points += 50
 	}
@@ -167,12 +172,13 @@ func postReceipt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := strconv.Itoa(curID)
-	receipts[id] = receipt
 	points := calcPoints(receipt)
+	//use mutex lock here because receipts and pointsAwarded are global maps
+	mu.Lock()
+	id := uuid.New().String()
+	receipts[id] = receipt
 	pointsAwarded[id] = points
-
-	curID++
+	mu.Unlock()
 
 	//sanity check our id
 	if !validateString(id, idPattern) {
@@ -189,15 +195,18 @@ func postReceipt(w http.ResponseWriter, r *http.Request) {
 func getReceiptPoints(w http.ResponseWriter, r *http.Request) {
 
 	//get id from URL
-	id := r.URL.Path[len("/receipts/"):]
-	slashIndex := strings.Index(id, "/")
-	id = id[:slashIndex]
+	id := strings.TrimPrefix(r.URL.Path, "/receipts/")
+	id = strings.Split(id, "/")[0]
 
 	if !validateString(id, idPattern) {
 		http.Error(w, "invalid ID", http.StatusNotFound)
 		return
 	}
+
+	//mutex lock since we are accessing global map
+	mu.Lock()
 	pointTotal, contains := pointsAwarded[id]
+	mu.Unlock()
 
 	if !contains {
 		http.Error(w, "Receipt not found for given ID ", http.StatusNotFound)
@@ -227,5 +236,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	log.Println("Server running on :8080")
-	http.ListenAndServe(":8080", http.HandlerFunc(handler))
+	if err := http.ListenAndServe(":8080", http.HandlerFunc(handler)); err != nil {
+		log.Fatalf("Server encountered problem: %v ", err)
+	}
+
 }
